@@ -1,4 +1,4 @@
-/* global BANKS, VietQR, qrcode */
+/* global BANKS, VietQR, qrcode, Providers */
 (function () {
   'use strict';
 
@@ -9,24 +9,99 @@
   };
 
   // ---------- settings ----------
+  var providerSel = $('#provider');
   var apiKey = $('#apiKey');
   var model = $('#model');
   var noteTpl = $('#noteTpl');
-  apiKey.value = store.get('key', '');
-  model.value = store.get('model', 'gemini-3.6-flash');
+  var modelMeta = {}; // id -> {pdf, structured} from the provider's model list
+  var modelList = [];
+
+  // one-time move of the v1 single Gemini key
+  if (store.get('key', '') && !store.get('key.gemini', '')) store.set('key.gemini', store.get('key', ''));
+
+  Providers.list.forEach(function (p) { var o = document.createElement('option'); o.value = p.id; o.textContent = p.name; providerSel.appendChild(o); });
+  providerSel.value = store.get('provider', 'gemini');
   noteTpl.value = store.get('tpl', noteTpl.value);
+
+  function provider() { return Providers.get(providerSel.value); }
+  function shortName() { return provider().name.split(' (')[0]; }
   function showKeyState() {
     var has = apiKey.value.trim().length > 0;
-    $('#keyState').textContent = has ? 'AI đang bật' : 'chưa có khoá AI, gõ tay';
+    $('#keyState').textContent = has ? 'AI: ' + shortName() + (model.value ? ' · ' + model.value : '') : 'chưa có khoá AI, gõ tay';
     $('#keyState').className = 'pill ' + (has ? 'on' : 'off');
   }
-  apiKey.addEventListener('input', function () { store.set('key', apiKey.value.trim()); showKeyState(); });
-  model.addEventListener('change', function () { store.set('model', model.value); });
+  function fillModelSelect(models, keep) {
+    modelList = Providers.sort(models);
+    modelMeta = {};
+    model.innerHTML = '';
+    var groups = {};
+    modelList.forEach(function (m) {
+      modelMeta[m.id] = m;
+      var o = document.createElement('option');
+      o.value = m.id;
+      o.textContent = m.label === m.id ? m.id : m.label + ' · ' + m.id;
+      var parent = model;
+      if (m.group) {
+        if (!groups[m.group]) { groups[m.group] = document.createElement('optgroup'); groups[m.group].label = m.group; model.appendChild(groups[m.group]); }
+        parent = groups[m.group];
+      }
+      parent.appendChild(o);
+    });
+    var pick = keep && modelMeta[keep] ? keep : (Providers.pickDefault(modelList) || {}).id;
+    if (pick) model.value = pick;
+    store.set('model.' + provider().id, model.value);
+    $('#modelNote').textContent = modelList.length
+      ? modelList.length + ' model đọc được ảnh, lấy trực tiếp từ ' + shortName() + '. Đã chọn sẵn model mới và nhanh; đổi tuỳ ý. Model bận thì tool tự thử model khác.'
+      : 'Hãng không trả model nào đọc được ảnh.';
+    showKeyState();
+  }
+  function loadModels(force) {
+    var p = provider();
+    var key = apiKey.value.trim();
+    var cacheKey = 'models.' + p.id;
+    var saved = store.get('model.' + p.id, '');
+    if (!force) {
+      try {
+        var c = JSON.parse(store.get(cacheKey, 'null'));
+        if (c && Date.now() - c.at < 24 * 3600 * 1000 && c.models.length) { fillModelSelect(c.models, saved); return Promise.resolve(); }
+      } catch (e) { /* ignore bad cache */ }
+    }
+    if (!key) { model.innerHTML = '<option value="">Dán khoá để tải danh sách model</option>'; showKeyState(); return Promise.resolve(); }
+    model.innerHTML = '<option value="">Đang tải danh sách model…</option>';
+    return p.listModels(key).then(function (models) {
+      store.set(cacheKey, JSON.stringify({ at: Date.now(), models: models }));
+      fillModelSelect(models, saved);
+    }).catch(function (e) {
+      modelList = [];
+      model.innerHTML = '<option value="">Không tải được danh sách model</option>';
+      $('#modelNote').textContent = (e.status === 401 || e.status === 403 || e.status === 400) ? 'Khoá không đúng hoặc chưa có quyền. Kiểm tra lại khoá.' : 'Lỗi tải danh sách: ' + e.message;
+      showKeyState();
+    });
+  }
+  function showProvider() {
+    var p = provider();
+    apiKey.value = store.get('key.' + p.id, '');
+    apiKey.placeholder = 'Dán khoá ' + p.keyHint;
+    $('#keyLink').href = p.keyUrl;
+    $('#keyLink').textContent = p.keyUrl.replace(/^https:\/\//, '');
+    $('#providerNote').textContent = p.note;
+    return loadModels(false);
+  }
+  var keyTimer = null;
+  providerSel.addEventListener('change', function () { store.set('provider', providerSel.value); showProvider(); });
+  apiKey.addEventListener('input', function () {
+    store.set('key.' + provider().id, apiKey.value.trim());
+    showKeyState();
+    clearTimeout(keyTimer);
+    keyTimer = setTimeout(function () { loadModels(true); }, 600);
+  });
+  model.addEventListener('change', function () { store.set('model.' + provider().id, model.value); showKeyState(); });
+  $('#reloadModels').addEventListener('click', function () { loadModels(true); });
   noteTpl.addEventListener('input', function () {
     store.set('tpl', noteTpl.value);
     cards.forEach(function (c) { if (!c.noteEdited) { c.fillNote(); c.render(); } });
   });
-  showKeyState();
+  showProvider();
   if (!apiKey.value) $('#settings').open = true;
 
   // ---------- banks ----------
@@ -35,7 +110,7 @@
   BANKS.forEach(function (b) { var o = document.createElement('option'); o.value = bankLabel(b); dl.appendChild(o); });
 
   function fold(s) {
-    return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/đ/g, 'd').replace(/Đ/g, 'D')
+    return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\u0111/g, 'd').replace(/\u0110/g, 'D')
       .toLowerCase().replace(/ngan hang|thuong mai|co phan|tmcp|tnhh mtv|bank|chi nhanh.*$/g, ' ').replace(/[^a-z0-9]/g, '');
   }
   function findBank(text) {
@@ -52,21 +127,14 @@
 
   // ---------- AI ----------
   var PROMPT = [
-    'Bạn đọc hoá đơn / phiếu yêu cầu thanh toán của Việt Nam. Trả về JSON đúng schema.',
+    'Bạn đọc hoá đơn / phiếu yêu cầu thanh toán của Việt Nam. Chỉ trả về 1 object JSON, không giải thích.',
+    'Các khoá: bank, account, holder, amount, so_hd, ncc, mst, ngay (đều là chuỗi).',
     'Lấy thông tin TÀI KHOẢN NHẬN TIỀN của BÊN BÁN (người bán, nhà cung cấp), không phải bên mua.',
     'bank: tên ngắn ngân hàng nhận, chọn đúng 1 tên trong danh sách: ' + BANKS.map(function (b) { return b.short; }).join(', ') + '.',
-    'account: chỉ chữ số của số tài khoản. amount: tổng tiền phải thanh toán (đã gồm thuế), chỉ chữ số, đơn vị đồng.',
+    'account: chỉ chữ số của số tài khoản. holder: tên chủ tài khoản. amount: tổng tiền phải thanh toán (đã gồm thuế), chỉ chữ số, đơn vị đồng.',
     'so_hd: số hoá đơn. ncc: tên ngắn bên bán, tối đa 3 từ, bỏ "Công ty TNHH/Cổ phần". mst: mã số thuế bên bán. ngay: ngày hoá đơn dd/mm/yyyy.',
-    'Không thấy trường nào thì để chuỗi rỗng. Không đoán số tài khoản.',
+    'Không thấy trường nào thì để chuỗi rỗng. Không đoán số tài khoản: mã khách hàng, số điện thoại, mã số thuế không phải số tài khoản.',
   ].join('\n');
-  var SCHEMA = {
-    type: 'OBJECT',
-    properties: {
-      bank: { type: 'STRING' }, account: { type: 'STRING' }, holder: { type: 'STRING' }, amount: { type: 'STRING' },
-      so_hd: { type: 'STRING' }, ncc: { type: 'STRING' }, mst: { type: 'STRING' }, ngay: { type: 'STRING' },
-    },
-    required: ['bank', 'account', 'holder', 'amount', 'so_hd', 'ncc', 'mst', 'ngay'],
-  };
 
   function toBase64(file) {
     return new Promise(function (ok, bad) {
@@ -77,56 +145,109 @@
     });
   }
 
-  var MODELS = ['gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-flash-latest'];
-  var BUSY = { 429: 1, 500: 1, 502: 1, 503: 1, 504: 1 }; // overload or per-model quota: retry, then another model
-  function wait(ms) { return new Promise(function (ok) { setTimeout(ok, ms); }); }
-
-  function callGemini(modelId, key, mime, data) {
-    var url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(modelId) + ':generateContent';
-    return fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ inline_data: { mime_type: mime, data: data } }, { text: PROMPT }] }],
-        generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: SCHEMA },
-      }),
-    }).then(function (res) {
-      return res.json().catch(function () { return {}; }).then(function (j) { return { status: res.status, ok: res.ok, j: j }; });
-    }, function () { return { status: 503, ok: false, j: { error: { message: 'Mất kết nối mạng' } } }; });
+  // PDF -> JPEG pages, for models that only take images. pdf.js is loaded on first use.
+  var PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
+  var pdfjsReady = null;
+  function loadPdfjs() {
+    if (!pdfjsReady) {
+      pdfjsReady = new Promise(function (ok, bad) {
+        var s = document.createElement('script');
+        s.src = PDFJS + 'pdf.min.js';
+        s.onload = function () { window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS + 'pdf.worker.min.js'; ok(window.pdfjsLib); };
+        s.onerror = function () { pdfjsReady = null; bad(new Error('Không tải được bộ đọc PDF')); };
+        document.head.appendChild(s);
+      });
+    }
+    return pdfjsReady;
+  }
+  function pdfToImages(base64, maxPages) {
+    return loadPdfjs().then(function (lib) {
+      var bytes = Uint8Array.from(atob(base64), function (c) { return c.charCodeAt(0); });
+      return lib.getDocument({ data: bytes }).promise.then(function (doc) {
+        var n = Math.min(doc.numPages, maxPages);
+        var jobs = [];
+        for (var i = 1; i <= n; i++) {
+          jobs.push(doc.getPage(i).then(function (page) {
+            var vp = page.getViewport({ scale: 2 });
+            var c = document.createElement('canvas'); c.width = vp.width; c.height = vp.height;
+            return page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise.then(function () {
+              return { mime: 'image/jpeg', data: c.toDataURL('image/jpeg', 0.85).split(',')[1] };
+            });
+          }));
+        }
+        return Promise.all(jobs);
+      });
+    });
   }
 
-  // Selected model first (2 tries), then the other models (1 try each). onStep(text) reports progress.
+  function parseJson(text) {
+    var t = String(text || '').trim().replace(/^\x60\x60\x60(?:json)?\s*/i, '').replace(/\x60\x60\x60\s*$/, '');
+    try { return JSON.parse(t); } catch (e) {
+      var m = t.match(/\{[\s\S]*\}/);
+      if (m) { try { return JSON.parse(m[0]); } catch (e2) { /* fall through */ } }
+      throw new Error('AI trả lời không đúng dạng. Bấm Đọc lại hoặc chọn model khác.');
+    }
+  }
+
+  var RETRY = { 0: 1, 408: 1, 429: 1, 500: 1, 502: 1, 503: 1, 504: 1, 529: 1 };
+  function wait(ms) { return new Promise(function (ok) { setTimeout(ok, ms); }); }
+
+  // Try plan: chosen model twice, then up to 2 other stable models of the same provider, same speed tier first.
+  function plan(chosen) {
+    var tier = Providers.FAST.test(chosen);
+    var others = Providers.sort(modelList).filter(function (m) { return m.id !== chosen && !Providers.UNSTABLE.test(m.id); });
+    others.sort(function (a, b) { return (Providers.FAST.test(b.id) === tier) - (Providers.FAST.test(a.id) === tier); });
+    return [chosen, chosen].concat(others.slice(0, 2).map(function (m) { return m.id; }));
+  }
+
   function readInvoice(file, onStep) {
+    var p = provider();
+    var name = shortName();
     var key = apiKey.value.trim();
-    var plan = [model.value, model.value].concat(MODELS.filter(function (m) { return m !== model.value; }));
+    var chosen = model.value;
+    if (!chosen) return Promise.reject(new Error('Chưa chọn model. Mở Cài đặt, bấm Tải lại danh sách.'));
+    var steps = plan(chosen);
     return toBase64(file).then(function (data) {
-      var mime = file.type || 'application/pdf';
+      var input = { mime: file.type || 'application/pdf', data: data, name: file.name };
       var i = 0;
       var last = null;
+      function prepare(m) {
+        var meta = modelMeta[m] || {};
+        var needImg = input.mime === 'application/pdf' && (p.needsImages || meta.pdf === false);
+        if (!needImg || input.pages) return Promise.resolve();
+        onStep('Đang đổi PDF sang ảnh…');
+        return pdfToImages(input.data, 3).then(function (pages) { input.pages = pages; });
+      }
       function next() {
-        if (i >= plan.length) {
-          var why = last && last.status === 429 ? 'Hết lượt miễn phí của khoá ở mọi model. Đợi 1–2 phút rồi bấm Đọc lại.'
-            : 'Máy chủ AI của Google đang quá tải. Đợi vài phút rồi bấm Đọc lại.';
-          throw new Error(why);
+        if (i >= steps.length) {
+          if (last && last.status === 429) throw new Error('Hết lượt dùng của khoá ở mọi model đã thử. Đợi 1–2 phút rồi bấm Đọc lại.');
+          if (last && last.kind === 'input') throw new Error('Các model đã thử không đọc được loại file này. Chọn model khác hoặc hãng khác (OpenRouter, Gemini).');
+          throw new Error('Máy chủ AI đang quá tải. Đợi vài phút rồi bấm Đọc lại, hoặc chọn hãng khác.');
         }
-        var m = plan[i];
-        if (i > 0) onStep('AI bận, thử lại' + (m !== model.value ? ' bằng ' + m : '') + '…');
-        return (i > 0 ? wait(i === 1 ? 2000 : 1500) : Promise.resolve()).then(function () { return callGemini(m, key, mime, data); }).then(function (r) {
-          i++;
-          if (!r.ok) {
-            var msg = (r.j.error && r.j.error.message) || ('HTTP ' + r.status);
-            if (BUSY[r.status]) { last = r; return next(); }
-            if (r.status === 400 && /API key/i.test(msg)) throw new Error('Khoá Gemini không đúng. Kiểm tra lại trong Cài đặt.');
-            if (r.status === 403) throw new Error('Khoá Gemini không có quyền dùng model này. Kiểm tra khoá trong Cài đặt.');
-            if (r.status === 404) { last = r; return next(); } // model id retired: try the next one
-            throw new Error('Lỗi từ Gemini: ' + msg);
-          }
-          var c = r.j.candidates && r.j.candidates[0];
-          var text = c && c.content && c.content.parts && c.content.parts.map(function (p) { return p.text || ''; }).join('');
+        var m = steps[i];
+        if (i > 0) onStep('AI bận, thử lại' + (m !== chosen ? ' bằng ' + m : '') + '…');
+        var pause = i === 0 ? 0 : i === 1 ? 2000 : 1500;
+        i++;
+        return wait(pause).then(function () { return prepare(m); }).then(function () {
+          return p.read(key, m, input, PROMPT, modelMeta[m] || {});
+        }).then(function (text) {
           if (!text) throw new Error('AI không đọc được file này. Thử ảnh rõ hơn, hoặc gõ tay.');
-          var out = JSON.parse(text);
+          var out = parseJson(text);
           out._model = m;
           return out;
+        }, function (e) {
+          var s = e.status;
+          if (s === undefined) throw e;
+          if (s === 401 || (s === 400 && /api.?key|auth/i.test(e.message))) throw new Error('Khoá ' + name + ' không đúng. Kiểm tra lại trong Cài đặt.');
+          if (s === 402) throw new Error('Tài khoản ' + name + ' hết tiền. Nạp thêm hoặc chọn hãng khác.');
+          if (s === 403) throw new Error('Khoá không có quyền dùng model này. Chọn model khác trong Cài đặt.');
+          if (RETRY[s] !== undefined) { last = e; return next(); }
+          if (s === 404 || (s === 400 && /image|vision|file|pdf|modalit|document|content type|not support/i.test(e.message))) {
+            last = { status: s, kind: 'input' };
+            while (i < steps.length && steps[i] === m) i++; // same model will fail the same way
+            return next();
+          }
+          throw new Error('Lỗi từ ' + name + ': ' + e.message);
         });
       }
       return next();

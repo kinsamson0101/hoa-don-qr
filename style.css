@@ -31,6 +31,9 @@ label small { font-weight: 400; }
 input, select { font: inherit; font-size: 15px; color: var(--ink); background: var(--field); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; width: 100%; }
 input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
+.model-row { display: flex; gap: 8px; }
+.model-row select { flex: 1; min-width: 0; }
+.model-row button { flex: none; }
 .drop { display: flex; flex-direction: column; align-items: center; gap: 4px; margin: 16px 0 10px; padding: 34px 16px;
   border: 2px dashed var(--accent); border-radius: 14px; background: var(--accent-soft); cursor: pointer; text-align: center; color: var(--ink); }
 .drop strong { font-size: 19px; }

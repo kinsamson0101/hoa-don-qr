@@ -12,7 +12,7 @@
 <header class="top">
   <div class="wrap">
     <h1>Hoá đơn → mã QR chuyển khoản</h1>
-    <p class="sub">Thả ảnh hoặc PDF hoá đơn vào, AI đọc số tài khoản và số tiền, ra mã VietQR quét bằng app ngân hàng nào cũng được. Sửa tay được mọi ô trước khi tải.</p>
+    <p class="sub">Thả ảnh hoặc PDF hoá đơn vào, AI (Gemini, Claude, GPT, DeepSeek…) đọc số tài khoản và số tiền, ra mã VietQR quét bằng app ngân hàng nào cũng được. Sửa tay được mọi ô trước khi tải.</p>
   </div>
 </header>
 
@@ -20,17 +20,17 @@
   <details class="settings" id="settings">
     <summary>Cài đặt <span id="keyState" class="pill"></span></summary>
     <div class="grid2">
-      <label>Khoá Gemini API (miễn phí)
-        <input id="apiKey" type="password" autocomplete="off" placeholder="Dán khoá bắt đầu bằng AIza…">
-        <small>Lấy khoá miễn phí tại <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>. Khoá chỉ lưu trên trình duyệt này. Không có khoá thì vẫn dùng được: tự gõ các ô.</small>
+      <label>Hãng AI
+        <select id="provider"></select>
+        <small id="providerNote"></small>
       </label>
-      <label>Mô hình AI
-        <select id="model">
-          <option value="gemini-3.6-flash">gemini-3.6-flash (mặc định)</option>
-          <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (nhanh hơn)</option>
-          <option value="gemini-flash-latest">gemini-flash-latest (luôn bản mới nhất)</option>
-        </select>
-        <small>Khoá miễn phí: Google được dùng dữ liệu gửi lên để cải thiện sản phẩm. Hoá đơn mật thì bật thanh toán cho khoá, hoặc gõ tay.</small>
+      <label>Khoá API của hãng này
+        <input id="apiKey" type="password" autocomplete="off">
+        <small>Lấy khoá tại <a id="keyLink" target="_blank" rel="noopener"></a>. Khoá chỉ lưu trên trình duyệt này, mỗi hãng một khoá. Không có khoá thì vẫn dùng được: tự gõ các ô.</small>
+      </label>
+      <label class="full">Model
+        <span class="model-row"><select id="model"><option value="">Dán khoá để tải danh sách model</option></select><button id="reloadModels" type="button" class="ghost">Tải lại danh sách</button></span>
+        <small id="modelNote">Danh sách lấy trực tiếp từ hãng, chỉ gồm model đọc được ảnh. Model bận thì tool tự thử model khác cùng hãng.</small>
       </label>
       <label class="full">Mẫu nội dung chuyển khoản của công ty
         <input id="noteTpl" type="text" value="TT HD {so_hd} {ncc}">
@@ -52,7 +52,7 @@
   <section id="list" class="list" aria-live="polite"></section>
 
   <footer class="foot">
-    <p>Hoá đơn không gửi đi đâu ngoài Google Gemini (khi có khoá). Trang không có máy chủ, không lưu hoá đơn.</p>
+    <p>Hoá đơn chỉ gửi tới hãng AI bạn chọn (khi có khoá). Trang không có máy chủ, không lưu hoá đơn.</p>
     <p>Luôn so số tài khoản và số tiền với hoá đơn trước khi chuyển. AI có thể đọc sai.</p>
     <p>Mã nguồn: <a href="https://github.com/kinsamson0101/hoa-don-qr">github.com/kinsamson0101/hoa-don-qr</a> · MIT</p>
   </footer>
@@ -97,6 +97,7 @@
 <script src="vendor/qrcode.js"></script>
 <script src="banks.js"></script>
 <script src="vietqr.js"></script>
+<script src="providers.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
