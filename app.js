@@ -77,30 +77,59 @@
     });
   }
 
-  function readInvoice(file) {
-    var key = apiKey.value.trim();
-    return toBase64(file).then(function (data) {
-      var url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model.value) + ':generateContent';
-      return fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ inline_data: { mime_type: file.type || 'application/pdf', data: data } }, { text: PROMPT }] }],
-          generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: SCHEMA },
-        }),
-      });
+  var MODELS = ['gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-flash-latest'];
+  var BUSY = { 429: 1, 500: 1, 502: 1, 503: 1, 504: 1 }; // overload or per-model quota: retry, then another model
+  function wait(ms) { return new Promise(function (ok) { setTimeout(ok, ms); }); }
+
+  function callGemini(modelId, key, mime, data) {
+    var url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(modelId) + ':generateContent';
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ inline_data: { mime_type: mime, data: data } }, { text: PROMPT }] }],
+        generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: SCHEMA },
+      }),
     }).then(function (res) {
-      return res.json().then(function (j) {
-        if (!res.ok) {
-          var msg = (j.error && j.error.message) || ('HTTP ' + res.status);
-          if (res.status === 429) msg = 'Hết lượt miễn phí trong phút này, đợi 1 phút rồi bấm Đọc lại. (' + msg + ')';
-          if (res.status === 400 && /API key/i.test(msg)) msg = 'Khoá Gemini không đúng. Kiểm tra lại trong Cài đặt.';
-          throw new Error(msg);
+      return res.json().catch(function () { return {}; }).then(function (j) { return { status: res.status, ok: res.ok, j: j }; });
+    }, function () { return { status: 503, ok: false, j: { error: { message: 'Mất kết nối mạng' } } }; });
+  }
+
+  // Selected model first (2 tries), then the other models (1 try each). onStep(text) reports progress.
+  function readInvoice(file, onStep) {
+    var key = apiKey.value.trim();
+    var plan = [model.value, model.value].concat(MODELS.filter(function (m) { return m !== model.value; }));
+    return toBase64(file).then(function (data) {
+      var mime = file.type || 'application/pdf';
+      var i = 0;
+      var last = null;
+      function next() {
+        if (i >= plan.length) {
+          var why = last && last.status === 429 ? 'Hết lượt miễn phí của khoá ở mọi model. Đợi 1–2 phút rồi bấm Đọc lại.'
+            : 'Máy chủ AI của Google đang quá tải. Đợi vài phút rồi bấm Đọc lại.';
+          throw new Error(why);
         }
-        var text = j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts.map(function (p) { return p.text || ''; }).join('');
-        if (!text) throw new Error('AI không trả kết quả (có thể file không đọc được).');
-        return JSON.parse(text);
-      });
+        var m = plan[i];
+        if (i > 0) onStep('AI bận, thử lại' + (m !== model.value ? ' bằng ' + m : '') + '…');
+        return (i > 0 ? wait(i === 1 ? 2000 : 1500) : Promise.resolve()).then(function () { return callGemini(m, key, mime, data); }).then(function (r) {
+          i++;
+          if (!r.ok) {
+            var msg = (r.j.error && r.j.error.message) || ('HTTP ' + r.status);
+            if (BUSY[r.status]) { last = r; return next(); }
+            if (r.status === 400 && /API key/i.test(msg)) throw new Error('Khoá Gemini không đúng. Kiểm tra lại trong Cài đặt.');
+            if (r.status === 403) throw new Error('Khoá Gemini không có quyền dùng model này. Kiểm tra khoá trong Cài đặt.');
+            if (r.status === 404) { last = r; return next(); } // model id retired: try the next one
+            throw new Error('Lỗi từ Gemini: ' + msg);
+          }
+          var c = r.j.candidates && r.j.candidates[0];
+          var text = c && c.content && c.content.parts && c.content.parts.map(function (p) { return p.text || ''; }).join('');
+          if (!text) throw new Error('AI không đọc được file này. Thử ảnh rõ hơn, hoặc gõ tay.');
+          var out = JSON.parse(text);
+          out._model = m;
+          return out;
+        });
+      }
+      return next();
     });
   }
 
@@ -205,9 +234,12 @@
     var self = this;
     if (!apiKey.value.trim()) { this.status('Chưa có khoá AI: gõ tay các ô', 'warn'); return Promise.resolve(); }
     this.status('AI đang đọc…', 'busy');
-    return readInvoice(this.file).then(function (d) {
+    return readInvoice(this.file, function (t) { self.status(t, 'busy'); }).then(function (d) {
       self.fill(d);
-      self.status(self.payload ? 'Đã đọc · kiểm lại số TK và số tiền' : 'Đọc thiếu, gõ thêm', self.payload ? 'ok' : 'warn');
+      var via = d._model !== model.value ? ' (đọc bằng ' + d._model + ')' : '';
+      if (self.payload) self.status('Đã đọc · kiểm lại số TK và số tiền' + via, 'ok');
+      else if (!self.val('account')) self.status('Đã đọc · hoá đơn không ghi số tài khoản bên bán, gõ tay nếu biết' + via, 'warn');
+      else self.status('Đọc thiếu, gõ thêm' + via, 'warn');
     }).catch(function (e) { self.status(e.message, 'bad'); });
   };
 
