@@ -24,13 +24,34 @@
     e.status = status;
     return e;
   }
+  // Every call has a deadline: a provider that never answers must not freeze the page.
+  // opts.signal (caller cancel) and opts.timeoutMs (default 45 s) both abort the fetch.
+  var TIMEOUT_MS = 45000;
   function getJson(url, opts) {
-    return fetch(url, opts).then(function (res) {
+    opts = opts || {};
+    var ctl = new AbortController();
+    var timedOut = false;
+    var ms = opts.timeoutMs || TIMEOUT_MS;
+    var timer = setTimeout(function () { timedOut = true; ctl.abort(); }, ms);
+    var outer = opts.signal;
+    function onOuter() { ctl.abort(); }
+    if (outer) { if (outer.aborted) ctl.abort(); else outer.addEventListener('abort', onOuter); }
+    var init = {};
+    Object.keys(opts).forEach(function (k) { if (k !== 'signal' && k !== 'timeoutMs') init[k] = opts[k]; });
+    init.signal = ctl.signal;
+    function done() { clearTimeout(timer); if (outer) outer.removeEventListener('abort', onOuter); }
+    return fetch(url, init).then(function (res) {
       return res.json().catch(function () { return {}; }).then(function (j) {
         if (!res.ok) throw httpError(res.status, j);
         return j;
       });
-    }, function () { var e = new Error('Mất kết nối mạng'); e.status = 0; throw e; });
+    }, function () {
+      var e;
+      if (timedOut) { e = new Error('AI không trả lời sau ' + Math.round(ms / 1000) + ' giây'); e.status = 'timeout'; }
+      else if (outer && outer.aborted) { e = new Error('Đã huỷ'); e.status = 'cancelled'; }
+      else { e = new Error('Mất kết nối mạng'); e.status = 0; }
+      throw e;
+    }).then(function (j) { done(); return j; }, function (e) { done(); throw e; });
   }
   function dataUrl(mime, data) { return 'data:' + mime + ';base64,' + data; }
   // Newest first: provider timestamp when given, else the version number inside the id.
@@ -56,17 +77,32 @@
         });
       });
     },
-    read: function (key, model, input, prompt) {
+    // Gemini 3+ thinks by default (Pro: "high"), which turns a 5 s read into 30-60 s. Copying fields off an
+    // invoice needs no reasoning, so ask for "low" (accepted by every 3.x/4 family). Models that reject the
+    // field are remembered and called without it.
+    noThinkingCfg: {},
+    thinkingConfig: function (model) {
+      if (gemini.noThinkingCfg[model] || !/^gemini-([3-9]|\d\d)/.test(model)) return null;
+      return { thinkingLevel: 'low' };
+    },
+    read: function (key, model, input, prompt, meta, signal) {
+      var gen = { temperature: 0, responseMimeType: 'application/json', responseSchema: GEMINI_SCHEMA };
+      var think = gemini.thinkingConfig(model);
+      if (think) gen.thinkingConfig = think;
+      var parts = (input.pages || [input]).map(function (p) { return { inline_data: { mime_type: p.mime, data: p.data } }; });
       return getJson('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent', {
-        method: 'POST',
+        method: 'POST', signal: signal, timeoutMs: meta && meta.timeoutMs,
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ inline_data: { mime_type: input.mime, data: input.data } }, { text: prompt }] }],
-          generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: GEMINI_SCHEMA },
-        }),
+        body: JSON.stringify({ contents: [{ role: 'user', parts: parts.concat([{ text: prompt }]) }], generationConfig: gen }),
       }).then(function (j) {
         var c = j.candidates && j.candidates[0];
-        return c && c.content && c.content.parts ? c.content.parts.map(function (p) { return p.text || ''; }).join('') : '';
+        return c && c.content && c.content.parts ? c.content.parts.filter(function (p) { return !p.thought; }).map(function (p) { return p.text || ''; }).join('') : '';
+      }, function (e) {
+        if (think && e.status === 400 && /thinking/i.test(e.message)) {
+          gemini.noThinkingCfg[model] = true;
+          return gemini.read(key, model, input, prompt, meta, signal);
+        }
+        throw e;
       });
     },
   };
@@ -98,13 +134,13 @@
         });
       });
     },
-    read: function (key, model, input, prompt, meta) {
+    read: function (key, model, input, prompt, meta, signal) {
       var block = input.mime === 'application/pdf'
         ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: input.data } }
         : { type: 'image', source: { type: 'base64', media_type: input.mime, data: input.data } };
       var body = { model: model, max_tokens: 8000, messages: [{ role: 'user', content: [block, { type: 'text', text: prompt }] }] };
       if (meta && meta.structured) body.output_config = { format: { type: 'json_schema', schema: JSON_SCHEMA } };
-      return getJson('https://api.anthropic.com/v1/messages', { method: 'POST', headers: claudeHeaders(key), body: JSON.stringify(body) }).then(function (j) {
+      return getJson('https://api.anthropic.com/v1/messages', { method: 'POST', signal: signal, timeoutMs: meta && meta.timeoutMs, headers: claudeHeaders(key), body: JSON.stringify(body) }).then(function (j) {
         if (j.stop_reason === 'refusal') throw new Error('Claude từ chối đọc file này.');
         return (j.content || []).filter(function (b) { return b.type === 'text'; }).map(function (b) { return b.text; }).join('');
       });
@@ -128,7 +164,7 @@
         var opts = cfg.listNeedsKey ? { headers: { Authorization: 'Bearer ' + key } } : {};
         return getJson(cfg.base + '/models', opts).then(function (j) { return cfg.mapModels(j.data || []); });
       },
-      read: function (key, model, input, prompt, meta) {
+      read: function (key, model, input, prompt, meta, signal) {
         var pdfOk = !!(meta && meta.pdf);
         var body = { model: model, messages: [{ role: 'user', content: chatParts(input, prompt, pdfOk) }] };
         body.response_format = cfg.strictJson
@@ -136,7 +172,7 @@
           : { type: 'json_object' };
         var headers = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key };
         if (cfg.extraHeaders) Object.keys(cfg.extraHeaders).forEach(function (h) { headers[h] = cfg.extraHeaders[h]; });
-        return getJson(cfg.base + '/chat/completions', { method: 'POST', headers: headers, body: JSON.stringify(body) }).then(function (j) {
+        return getJson(cfg.base + '/chat/completions', { method: 'POST', signal: signal, timeoutMs: meta && meta.timeoutMs, headers: headers, body: JSON.stringify(body) }).then(function (j) {
           var m = j.choices && j.choices[0] && j.choices[0].message;
           if (!m) return '';
           return typeof m.content === 'string' ? m.content : (m.content || []).map(function (p) { return p.text || ''; }).join('');
@@ -203,6 +239,7 @@
     sort: function (models) { return models.slice().sort(byNewest); },
     pickDefault: pickDefault,
     FAST: FAST, UNSTABLE: UNSTABLE,
+    getJson: getJson,
   };
   if (typeof module === 'object' && module.exports) module.exports = api; else root.Providers = api;
 })(this);

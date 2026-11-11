@@ -160,6 +160,26 @@
     }
     return pdfjsReady;
   }
+  // Phone photos are 3000-4000 px and several MB; the AI reads an invoice just as well at 1600 px, and the
+  // upload (base64 = +33%) is what users wait on over mobile data. Small files pass through untouched.
+  var MAX_SIDE = 1600;
+  function shrinkImage(file) {
+    if (!/^image\/(png|jpeg|webp|bmp)$/.test(file.type) || !window.createImageBitmap) return toBase64(file).then(function (d) { return { mime: file.type, data: d }; });
+    return createImageBitmap(file).then(function (bmp) {
+      var k = Math.min(1, MAX_SIDE / Math.max(bmp.width, bmp.height));
+      if (k === 1 && file.size <= 1024 * 1024) { bmp.close(); return toBase64(file).then(function (d) { return { mime: file.type, data: d }; }); }
+      var c = document.createElement('canvas');
+      c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+      var ctx = c.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height); // PNG transparency -> white, not black
+      ctx.drawImage(bmp, 0, 0, c.width, c.height);
+      bmp.close();
+      // Photos shrink most as JPEG; screenshots and scans with flat colours can be smaller as PNG.
+      var jpg = c.toDataURL('image/jpeg', 0.85).split(',')[1];
+      var png = file.type === 'image/png' ? c.toDataURL('image/png').split(',')[1] : null;
+      return png && png.length < jpg.length ? { mime: 'image/png', data: png } : { mime: 'image/jpeg', data: jpg };
+    }).catch(function () { return toBase64(file).then(function (d) { return { mime: file.type, data: d }; }); });
+  }
   function pdfToImages(base64, maxPages) {
     return loadPdfjs().then(function (lib) {
       var bytes = Uint8Array.from(atob(base64), function (c) { return c.charCodeAt(0); });
@@ -168,7 +188,8 @@
         var jobs = [];
         for (var i = 1; i <= n; i++) {
           jobs.push(doc.getPage(i).then(function (page) {
-            var vp = page.getViewport({ scale: 2 });
+            var base = page.getViewport({ scale: 1 });
+            var vp = page.getViewport({ scale: Math.min(3, MAX_SIDE / Math.max(base.width, base.height)) });
             var c = document.createElement('canvas'); c.width = vp.width; c.height = vp.height;
             return page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise.then(function () {
               return { mime: 'image/jpeg', data: c.toDataURL('image/jpeg', 0.85).split(',')[1] };
@@ -200,15 +221,18 @@
     return [chosen, chosen].concat(others.slice(0, 2).map(function (m) { return m.id; }));
   }
 
-  function readInvoice(file, onStep) {
+  var TOTAL_MS = 120000; // one card never waits longer than this, whatever the retries
+  function readInvoice(file, onStep, signal) {
     var p = provider();
     var name = shortName();
     var key = apiKey.value.trim();
     var chosen = model.value;
     if (!chosen) return Promise.reject(new Error('Chưa chọn model. Mở Cài đặt, bấm Tải lại danh sách.'));
     var steps = plan(chosen);
-    return toBase64(file).then(function (data) {
-      var input = { mime: file.type || 'application/pdf', data: data, name: file.name };
+    var started = Date.now();
+    var isPdf = (file.type || 'application/pdf') === 'application/pdf';
+    return (isPdf ? toBase64(file).then(function (d) { return { mime: 'application/pdf', data: d }; }) : shrinkImage(file)).then(function (img) {
+      var input = { mime: img.mime, data: img.data, name: file.name };
       var i = 0;
       var last = null;
       function prepare(m) {
@@ -219,7 +243,11 @@
         return pdfToImages(input.data, 3).then(function (pages) { input.pages = pages; });
       }
       function next() {
+        if (signal && signal.aborted) { var c = new Error('Đã huỷ'); c.status = 'cancelled'; throw c; }
+        var left = TOTAL_MS - (Date.now() - started);
+        if (i < steps.length && left < 5000) i = steps.length;
         if (i >= steps.length) {
+          if (last && last.status === 'timeout') throw new Error(name + ' không trả lời (đã chờ ' + Math.round((Date.now() - started) / 1000) + ' giây). Bấm Đọc lại, hoặc chọn model "flash/mini" khác trong Cài đặt.');
           if (last && last.status === 429) throw new Error('Hết lượt dùng của khoá ở mọi model đã thử. Đợi 1–2 phút rồi bấm Đọc lại.');
           if (last && last.kind === 'input') throw new Error('Các model đã thử không đọc được loại file này. Chọn model khác hoặc hãng khác (OpenRouter, Gemini).');
           throw new Error('Máy chủ AI đang quá tải. Đợi vài phút rồi bấm Đọc lại, hoặc chọn hãng khác.');
@@ -229,7 +257,7 @@
         var pause = i === 0 ? 0 : i === 1 ? 2000 : 1500;
         i++;
         return wait(pause).then(function () { return prepare(m); }).then(function () {
-          return p.read(key, m, input, PROMPT, modelMeta[m] || {});
+          return p.read(key, m, input, PROMPT, Object.assign({ timeoutMs: Math.min(45000, left) }, modelMeta[m] || {}), signal);
         }).then(function (text) {
           if (!text) throw new Error('AI không đọc được file này. Thử ảnh rõ hơn, hoặc gõ tay.');
           var out = parseJson(text);
@@ -237,7 +265,12 @@
           return out;
         }, function (e) {
           var s = e.status;
-          if (s === undefined) throw e;
+          if (s === undefined || s === 'cancelled') throw e;
+          if (s === 'timeout') {
+            last = e;
+            while (i < steps.length && steps[i] === m) i++; // a model that hung once will likely hang again
+            return next();
+          }
           if (s === 401 || (s === 400 && /api.?key|auth/i.test(e.message))) throw new Error('Khoá ' + name + ' không đúng. Kiểm tra lại trong Cài đặt.');
           if (s === 402) throw new Error('Tài khoản ' + name + ' hết tiền. Nạp thêm hoặc chọn hãng khác.');
           if (s === 403) throw new Error('Khoá không có quyền dùng model này. Chọn model khác trong Cài đặt.');
@@ -284,11 +317,11 @@
       self.render();
     });
     this.form.addEventListener('submit', function (e) { e.preventDefault(); });
-    $('.x', this.el).addEventListener('click', function () { self.el.remove(); cards.splice(cards.indexOf(self), 1); updateBulk(); });
+    $('.x', this.el).addEventListener('click', function () { if (self.ctl) self.ctl.abort(); self.ctl = null; self.el.remove(); cards.splice(cards.indexOf(self), 1); updateBulk(); });
     $('.dl', this.el).addEventListener('click', function () { self.download(); });
     var again = $('.again', this.el);
     again.hidden = !file;
-    again.addEventListener('click', function () { queue = queue.then(function () { return self.read(); }); });
+    again.addEventListener('click', function () { self.read(); });
     $('.cp', this.el).addEventListener('click', function (e) {
       if (!self.payload) return;
       var b = e.target;
@@ -351,17 +384,34 @@
     a.download = 'QR-' + (this.val('so_hd') || d.account).replace(/[^\w-]+/g, '_') + '.png';
     document.body.appendChild(a); a.click(); a.remove();
   };
+  // Each card owns its read: an AbortController (Đọc lại cancels the old call) and a seconds counter, so the
+  // user always sees that something is moving and for how long.
   Card.prototype.read = function () {
     var self = this;
+    if (this.ctl) this.ctl.abort();
     if (!apiKey.value.trim()) { this.status('Chưa có khoá AI: gõ tay các ô', 'warn'); return Promise.resolve(); }
-    this.status('AI đang đọc…', 'busy');
-    return readInvoice(this.file, function (t) { self.status(t, 'busy'); }).then(function (d) {
+    var ctl = this.ctl = new AbortController();
+    var t0 = Date.now();
+    var step = 'Chờ lượt đọc…';
+    function secs() { return Math.round((Date.now() - t0) / 1000); }
+    function tick() { if (self.ctl === ctl) self.status(step + ' ' + secs() + ' giây', 'busy'); }
+    tick();
+    var timer = setInterval(tick, 1000);
+    return slot(function () {
+      if (ctl.signal.aborted) return null;
+      step = 'AI đang đọc…'; tick();
+      return readInvoice(this.file, function (t) { step = t; tick(); }, ctl.signal);
+    }.bind(this)).then(function (d) {
+      if (!d || self.ctl !== ctl) return;
       self.fill(d);
-      var via = d._model !== model.value ? ' (đọc bằng ' + d._model + ')' : '';
+      var via = ' · đọc xong trong ' + secs() + ' giây bằng ' + d._model;
       if (self.payload) self.status('Đã đọc · kiểm lại số TK và số tiền' + via, 'ok');
       else if (!self.val('account')) self.status('Đã đọc · hoá đơn không ghi số tài khoản bên bán, gõ tay nếu biết' + via, 'warn');
       else self.status('Đọc thiếu, gõ thêm' + via, 'warn');
-    }).catch(function (e) { self.status(e.message, 'bad'); });
+    }).catch(function (e) {
+      if (self.ctl !== ctl || e.status === 'cancelled') return;
+      self.status(e.message, 'bad');
+    }).then(function () { clearInterval(timer); if (self.ctl === ctl) self.ctl = null; });
   };
 
   function drawQr(ctx, text, lines) {
@@ -387,13 +437,24 @@
   }
 
   // ---------- intake ----------
-  var queue = Promise.resolve();
+  // At most 2 reads at once (free tiers allow ~10 requests a minute); each card runs on its own, so one slow
+  // or hung call no longer holds up every other card the way the old single chain did.
+  var PARALLEL = 2, running = 0, waiting = [];
+  function slot(job) {
+    return new Promise(function (ok, bad) {
+      waiting.push(function () {
+        running++;
+        Promise.resolve().then(job).then(ok, bad).then(function () { running--; pump(); });
+      });
+      pump();
+    });
+  }
+  function pump() { while (running < PARALLEL && waiting.length) waiting.shift()(); }
   function addFiles(files) {
     Array.prototype.forEach.call(files, function (f) {
       if (!/^image\//.test(f.type) && f.type !== 'application/pdf') return;
       if (f.size > 20 * 1024 * 1024) { alert(f.name + ': file lớn hơn 20 MB, chụp lại nhẹ hơn.'); return; }
-      var card = new Card(f);
-      queue = queue.then(function () { return card.read(); }); // one at a time: free tier has a per-minute limit
+      new Card(f).read();
     });
     updateBulk();
   }
