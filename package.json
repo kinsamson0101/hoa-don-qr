@@ -1,0 +1,15 @@
+{
+  "name": "hoa-don-qr",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Drop an invoice (image or PDF), get a VietQR bank transfer code. Runs in the browser.",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "jsqr": "^1.4.0",
+    "pngjs": "^7.0.0",
+    "vietnam-qr-pay": "^1.5.1"
+  }
+}
