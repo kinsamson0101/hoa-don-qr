@@ -23,10 +23,22 @@
   providerSel.value = store.get('provider', 'gemini');
   noteTpl.value = store.get('tpl', noteTpl.value);
 
+  // Desktop build (hoa-don-qr.exe): keys live in a file on the user's machine and the local server adds them to
+  // each AI call; the page never sees a key. LOCAL.keys = {providerId: true} for providers with a saved key.
+  var LOCAL = window.HDQR_LOCAL || null;
   function provider() { return Providers.get(providerSel.value); }
+  function key() {
+    var typed = apiKey.value.trim();
+    if (LOCAL) return typed || (LOCAL.keys[provider().id] ? 'local' : '');
+    return typed;
+  }
+  function saveLocal(body) {
+    return fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); });
+  }
   function shortName() { return provider().name.split(' (')[0]; }
   function showKeyState() {
-    var has = apiKey.value.trim().length > 0;
+    var has = key().length > 0;
     $('#keyState').textContent = has ? 'AI: ' + shortName() + (model.value ? ' · ' + model.value : '') : 'chưa có khoá AI, gõ tay';
     $('#keyState').className = 'pill ' + (has ? 'on' : 'off');
   }
@@ -50,6 +62,7 @@
     var pick = keep && modelMeta[keep] ? keep : (Providers.pickDefault(modelList) || {}).id;
     if (pick) model.value = pick;
     store.set('model.' + provider().id, model.value);
+    if (LOCAL && model.value) saveLocal({ provider: provider().id, model: model.value }).catch(function () { /* batch mode only */ });
     $('#modelNote').textContent = modelList.length
       ? modelList.length + ' model đọc được ảnh, lấy trực tiếp từ ' + shortName() + '. Đã chọn sẵn model mới và nhanh; đổi tuỳ ý. Model bận thì tool tự thử model khác.'
       : 'Hãng không trả model nào đọc được ảnh.';
@@ -57,7 +70,7 @@
   }
   function loadModels(force) {
     var p = provider();
-    var key = apiKey.value.trim();
+    var k = key();
     var cacheKey = 'models.' + p.id;
     var saved = store.get('model.' + p.id, '');
     if (!force) {
@@ -66,9 +79,9 @@
         if (c && Date.now() - c.at < 24 * 3600 * 1000 && c.models.length) { fillModelSelect(c.models, saved); return Promise.resolve(); }
       } catch (e) { /* ignore bad cache */ }
     }
-    if (!key) { model.innerHTML = '<option value="">Dán khoá để tải danh sách model</option>'; showKeyState(); return Promise.resolve(); }
+    if (!k) { model.innerHTML = '<option value="">Dán khoá để tải danh sách model</option>'; showKeyState(); return Promise.resolve(); }
     model.innerHTML = '<option value="">Đang tải danh sách model…</option>';
-    return p.listModels(key).then(function (models) {
+    return p.listModels(k).then(function (models) {
       store.set(cacheKey, JSON.stringify({ at: Date.now(), models: models }));
       fillModelSelect(models, saved);
     }).catch(function (e) {
@@ -80,8 +93,8 @@
   }
   function showProvider() {
     var p = provider();
-    apiKey.value = store.get('key.' + p.id, '');
-    apiKey.placeholder = 'Dán khoá ' + p.keyHint;
+    apiKey.value = LOCAL ? '' : store.get('key.' + p.id, '');
+    apiKey.placeholder = LOCAL && LOCAL.keys[p.id] ? 'Đã lưu khoá trên máy này · dán khoá mới để thay' : 'Dán khoá ' + p.keyHint;
     $('#keyLink').href = p.keyUrl;
     $('#keyLink').textContent = p.keyUrl.replace(/^https:\/\//, '');
     $('#providerNote').textContent = p.note;
@@ -90,19 +103,32 @@
   var keyTimer = null;
   providerSel.addEventListener('change', function () { store.set('provider', providerSel.value); showProvider(); });
   apiKey.addEventListener('input', function () {
-    store.set('key.' + provider().id, apiKey.value.trim());
+    if (!LOCAL) store.set('key.' + provider().id, apiKey.value.trim());
     showKeyState();
     clearTimeout(keyTimer);
-    keyTimer = setTimeout(function () { loadModels(true); }, 600);
+    keyTimer = setTimeout(function () {
+      if (!LOCAL || !apiKey.value.trim()) return loadModels(true);
+      var id = provider().id;
+      saveLocal({ provider: id, key: apiKey.value.trim() }).then(function () {
+        LOCAL.keys[id] = true;
+        apiKey.value = '';
+        apiKey.placeholder = 'Đã lưu khoá trên máy này · dán khoá mới để thay';
+        return loadModels(true);
+      }).catch(function (e) { $('#modelNote').textContent = 'Không lưu được khoá: ' + e.message; });
+    }, 600);
   });
-  model.addEventListener('change', function () { store.set('model.' + provider().id, model.value); showKeyState(); });
+  model.addEventListener('change', function () {
+    store.set('model.' + provider().id, model.value);
+    if (LOCAL) saveLocal({ provider: provider().id, model: model.value }).catch(function () { /* batch mode only */ });
+    showKeyState();
+  });
   $('#reloadModels').addEventListener('click', function () { loadModels(true); });
   noteTpl.addEventListener('input', function () {
     store.set('tpl', noteTpl.value);
     cards.forEach(function (c) { if (!c.noteEdited) { c.fillNote(); c.render(); } });
   });
   showProvider();
-  if (!apiKey.value) $('#settings').open = true;
+  if (!key()) $('#settings').open = true;
 
   // ---------- banks ----------
   function bankLabel(b) { return b.short + ' · ' + b.bin + ' · ' + b.name; }
@@ -225,7 +251,7 @@
   function readInvoice(file, onStep, signal) {
     var p = provider();
     var name = shortName();
-    var key = apiKey.value.trim();
+    var k = key();
     var chosen = model.value;
     if (!chosen) return Promise.reject(new Error('Chưa chọn model. Mở Cài đặt, bấm Tải lại danh sách.'));
     var steps = plan(chosen);
@@ -257,7 +283,7 @@
         var pause = i === 0 ? 0 : i === 1 ? 2000 : 1500;
         i++;
         return wait(pause).then(function () { return prepare(m); }).then(function () {
-          return p.read(key, m, input, PROMPT, Object.assign({ timeoutMs: Math.min(45000, left) }, modelMeta[m] || {}), signal);
+          return p.read(k, m, input, PROMPT, Object.assign({ timeoutMs: Math.min(45000, left) }, modelMeta[m] || {}), signal);
         }).then(function (text) {
           if (!text) throw new Error('AI không đọc được file này. Thử ảnh rõ hơn, hoặc gõ tay.');
           var out = parseJson(text);
@@ -389,7 +415,7 @@
   Card.prototype.read = function () {
     var self = this;
     if (this.ctl) this.ctl.abort();
-    if (!apiKey.value.trim()) { this.status('Chưa có khoá AI: gõ tay các ô', 'warn'); return Promise.resolve(); }
+    if (!key()) { this.status('Chưa có khoá AI: gõ tay các ô', 'warn'); return Promise.resolve(); }
     var ctl = this.ctl = new AbortController();
     var t0 = Date.now();
     var step = 'Chờ lượt đọc…';

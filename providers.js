@@ -40,6 +40,8 @@
     Object.keys(opts).forEach(function (k) { if (k !== 'signal' && k !== 'timeoutMs') init[k] = opts[k]; });
     init.signal = ctl.signal;
     function done() { clearTimeout(timer); if (outer) outer.removeEventListener('abort', onOuter); }
+    // Desktop build: send every provider call through the local server, which adds the key from the user's file.
+    if (root.HDQR_LOCAL) url = url.replace(/^https:\/\/([^/]+)\//, '/proxy/$1/');
     return fetch(url, init).then(function (res) {
       return res.json().catch(function () { return {}; }).then(function (j) {
         if (!res.ok) throw httpError(res.status, j);

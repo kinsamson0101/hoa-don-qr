@@ -3,7 +3,7 @@
 **Tóm tắt:** Thả ảnh hoặc PDF hoá đơn vào trang web, AI đọc số tài khoản bên bán và số tiền, ra mã VietQR.
 App ngân hàng nào ở Việt Nam cũng quét được. Miễn phí, chạy trong trình duyệt, không cần cài.
 
-👉 **Dùng ngay:** https://kinsamson0101.github.io/hoa-don-qr/
+👉 **Dùng ngay:** https://kinsamson0101.github.io/hoa-don-qr/ · Ngại dán khoá lên web? Dùng [bản chạy trên máy](#bản-chạy-trên-máy).
 
 ## Dùng thế nào
 
@@ -44,8 +44,49 @@ flowchart LR
 - Trang không có máy chủ, không lưu hoá đơn. Khoá chỉ nằm trên trình duyệt của bạn, mỗi hãng một khoá.
 - Khoá **miễn phí**: Google được dùng dữ liệu gửi lên để cải thiện sản phẩm. Hoá đơn mật thì bật thanh toán
   cho khoá, hoặc gõ tay.
-- Gói miễn phí giới hạn số lần đọc mỗi phút. Thả nhiều file thì trang đọc lần lượt; báo hết lượt thì đợi 1 phút
-  rồi bấm **Đọc lại**.
+- Gói miễn phí giới hạn số lần đọc mỗi phút. Thả nhiều file thì trang đọc 2 file cùng lúc; báo hết lượt thì đợi
+  1 phút rồi bấm **Đọc lại**.
+- Mỗi lần gọi AI chờ tối đa 45 giây, mỗi hoá đơn tối đa 2 phút. Quá giờ thì tool thử model khác hoặc báo lỗi, không
+  treo. Dòng trạng thái đếm giây đang chờ.
+
+## Bản chạy trên máy
+
+Một file chạy thẳng, không cài gì. Khoá AI lưu trong file trên máy bạn, không nằm trong trình duyệt. Hoá đơn chỉ
+đi từ máy bạn tới hãng AI bạn chọn.
+
+| Máy | Tải ở [Releases](https://github.com/kinsamson0101/hoa-don-qr/releases/latest) |
+|---|---|
+| Windows | `hoa-don-qr-windows-amd64.exe` (máy ARM: `-arm64.exe`) |
+| macOS chip M | `hoa-don-qr-darwin-arm64` |
+| macOS chip Intel | `hoa-don-qr-darwin-amd64` |
+
+1. Mở file vừa tải. Windows báo "Windows protected your PC" thì bấm **More info → Run anyway** (file chưa ký số).
+   macOS: `chmod +x` rồi chuột phải → **Open**.
+2. Trình duyệt tự mở trang `http://127.0.0.1:…`. Dùng y như bản web. Dán khoá một lần, lần sau không cần dán lại.
+3. Đóng cửa sổ đen là tắt.
+
+```mermaid
+flowchart LR
+    A[Trang trên máy bạn] --> B[hoa-don-qr.exe gắn khoá]
+    K[(config.json trên máy)] --> B
+    B --> C[Hãng AI bạn chọn]
+```
+
+**Đọc cả thư mục, không cần mở trang** (dùng hãng, model và mẫu nội dung đã chọn lần cuối trên trang):
+
+```bat
+hoa-don-qr-windows-amd64.exe --dir D:\hoadon
+```
+
+Ra thư mục `D:\hoadon\qr`: mỗi hoá đơn 1 ảnh `QR-<tên file>.png` và bảng `ket-qua.csv` mở bằng Excel. Thêm
+`--provider`, `--model`, `--note "TT HD {so_hd} {ncc}"` để đổi lựa chọn.
+
+| Hệ điều hành | Khoá lưu ở |
+|---|---|
+| Windows | `%APPDATA%\hoa-don-qr\config.json` |
+| macOS | `~/Library/Application Support/hoa-don-qr/config.json` |
+
+Trang trên máy chỉ nhận lệnh từ chính nó: web khác mở cùng trình duyệt không gọi được AI bằng khoá của bạn.
 
 ## Giới hạn
 
@@ -57,10 +98,15 @@ flowchart LR
 
 ```bash
 npm install
-npm test                    # 12 test: chuỗi VietQR, giải mã QR, chọn model mặc định (có 1 test gọi danh sách OpenRouter thật)
+npm test                    # 15 test: chuỗi VietQR, giải mã QR, chọn model, timeout/huỷ (có 1 test gọi danh sách OpenRouter thật)
 node tools/update-banks.js  # cập nhật danh sách ngân hàng
 python samples/make_sample.py  # vẽ lại hoá đơn mẫu (dữ liệu giả)
+tools/build-desktop.sh v1.1.0  # bản chạy trên máy (Go 1.27+): chạy go test rồi build vào dist/
 ```
+
+Bản chạy trên máy viết bằng Go, nhúng nguyên trang web (`embed.go`), thêm proxy gắn khoá (`cmd/hoa-don-qr/server.go`)
+và chế độ `--dir` (`batch.go`). `vietqr` bản Go kiểm cùng bộ chuỗi mẫu với bản JS. Chạy test Go: `GOFLAGS=-mod=mod go test ./...`
+(thư mục `vendor/` là JS của trang, không phải module Go).
 
 Trang tĩnh, không build: `index.html`, `app.js`, `providers.js` (5 hãng AI, danh sách model lấy từ API của hãng), `vietqr.js` (tạo chuỗi VietQR theo chuẩn EMVCo của NAPAS),
 `banks.js`, `vendor/qrcode.js`. Thư viện bên thứ ba: [THIRD-PARTY.md](THIRD-PARTY.md).
